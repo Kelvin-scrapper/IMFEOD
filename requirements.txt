@@ -1,0 +1,31 @@
+# IMF IMFEOD Data Pipeline Requirements
+# Install with: pip install -r requirements.txt
+
+# Web scraping dependencies
+undetected-chromedriver>=3.5.0
+selenium>=4.15.0
+requests>=2.31.0
+
+# Data processing dependencies
+pandas>=2.1.0
+openpyxl>=3.1.0
+
+# Date and time utilities (usually included in Python standard library)
+# datetime - included in Python standard library
+
+# System and process utilities (included in Python standard library)
+# os - included in Python standard library
+# sys - included in Python standard library
+# subprocess - included in Python standard library
+# logging - included in Python standard library
+# time - included in Python standard library
+# re - included in Python standard library
+# glob - included in Python standard library
+# argparse - included in Python standard library
+# platform - included in Python standard library
+
+# Optional: For better logging and debugging
+colorlog>=6.7.0
+
+# Optional: For progress bars during long operations
+tqdm>=4.66.0
