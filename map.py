@@ -163,40 +163,49 @@ class IMFDataMapper:
     def detect_columns(self, header_line):
         """
         Dynamically detect column positions by header names.
-        
+
         Args:
             header_line (str): Tab-separated header line
-            
+
         Returns:
             dict: Mapping of column names to indices
         """
         headers = header_line.strip().split('\t')
         column_map = {}
-        
+
         # Define flexible column patterns to match
+        # Order matters: more specific patterns first
         column_patterns = {
-            'facility_type': ['facility', 'type', 'arrangement type'],
-            'arrangement_date': ['date', 'arrangement date', 'effective date', 'approval date'],
-            'amount_agreed': ['agreed', 'amount agreed', 'committed', 'commitment'],
-            'amount_drawn': ['drawn', 'amount drawn', 'disbursed', 'disbursement'],
-            'amount_outstanding': ['outstanding', 'amount outstanding', 'balance', 'remaining']
+            'facility_type': ['facility'],
+            'arrangement_date': ['date of arrangement', 'arrangement date', 'effective date', 'approval date', 'date of'],
+            'expiration_date': ['expiration', 'expiration date', 'end date'],
+            'amount_agreed': ['amount agreed', 'agreed', 'committed', 'commitment'],
+            'amount_drawn': ['amount drawn', 'drawn', 'disbursed', 'disbursement'],
+            'amount_outstanding': ['amount outstanding', 'outstanding', 'balance', 'remaining']
         }
-        
+
         # Match headers to columns (case-insensitive, flexible matching)
+        # Try to match more specific patterns first
         for i, header in enumerate(headers):
             header_lower = header.lower().strip()
+            matched = False
+
             for field_name, patterns in column_patterns.items():
-                for pattern in patterns:
-                    if pattern in header_lower:
-                        column_map[field_name] = i
-                        self.logger.debug(f"Mapped '{header}' (col {i}) to {field_name}")
-                        break
-                if field_name in column_map:
+                if matched:
                     break
-        
+                for pattern in patterns:
+                    # Check if pattern matches
+                    if pattern in header_lower:
+                        # Avoid double-mapping: don't map if this column is already mapped
+                        if i not in column_map.values():
+                            column_map[field_name] = i
+                            self.logger.debug(f"Mapped '{header}' (col {i}) to {field_name}")
+                            matched = True
+                            break
+
         # Log detected mappings
         self.logger.info(f"Column mappings detected: {column_map}")
-        
+
         return column_map
     
     def find_country_name(self, lines):
@@ -230,10 +239,11 @@ class IMFDataMapper:
     def find_data_start(self, lines):
         """
         Dynamically find where data starts using multiple patterns.
-        
+        Handles multi-line headers by merging them.
+
         Args:
             lines (list): File lines
-            
+
         Returns:
             tuple: (data_start_index, column_mappings) or (None, None)
         """
@@ -244,16 +254,49 @@ class IMFDataMapper:
             r'date.*amount',
             r'agreed.*drawn.*outstanding'
         ]
-        
+
         for i, line in enumerate(lines):
             line_lower = line.lower()
             # Check if this looks like a header line
             if any(pattern in line_lower for pattern in header_patterns):
                 if '\t' in line:  # Must be tab-separated
                     self.logger.info(f"Data header found at line {i+1}: {line.strip()}")
-                    column_mappings = self.detect_columns(line)
+
+                    # Check if the next line is a continuation of the header (multi-line header)
+                    # IMF files have headers like:
+                    # Line 1: Facility	Date of	Expiration	Amount	Amount	Amount
+                    # Line 2: 	Arrangement	Date 4/	Agreed	Drawn	Outstanding
+                    merged_header = line
+                    if i + 1 < len(lines):
+                        next_line = lines[i + 1]
+                        # Check if next line starts with tabs (indicating it's a header continuation)
+                        if next_line.startswith('\t') or 'agreed' in next_line.lower() or 'drawn' in next_line.lower():
+                            # Merge the two header lines - split by tab WITHOUT stripping
+                            # This preserves empty columns from leading tabs
+                            header_parts1 = line.rstrip('\r\n').split('\t')
+                            header_parts2 = next_line.rstrip('\r\n').split('\t')
+
+                            # Merge corresponding columns
+                            merged_parts = []
+                            max_len = max(len(header_parts1), len(header_parts2))
+                            for j in range(max_len):
+                                part1 = header_parts1[j].strip() if j < len(header_parts1) else ''
+                                part2 = header_parts2[j].strip() if j < len(header_parts2) else ''
+                                # Combine the two parts with a space
+                                merged = f"{part1} {part2}".strip()
+                                merged_parts.append(merged)
+
+                            merged_header = '\t'.join(merged_parts)
+                            self.logger.info(f"Merged multi-line header: {merged_header}")
+
+                            # Data starts after the second header line
+                            column_mappings = self.detect_columns(merged_header)
+                            return i + 2, column_mappings
+
+                    # Single-line header
+                    column_mappings = self.detect_columns(merged_header)
                     return i + 1, column_mappings
-        
+
         self.logger.warning("Could not find data header line")
         return None, None
 
