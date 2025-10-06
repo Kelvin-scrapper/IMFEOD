@@ -17,6 +17,8 @@ import subprocess
 import re
 import platform
 import requests
+import shutil
+import zipfile
 
 # Configuration
 HEADLESS_MODE = True  # Set to True for headless mode, False for visible browser
@@ -64,35 +66,47 @@ class IMFScraper:
     def detect_chrome_version(self):
         """
         Detect the installed Chrome version automatically
-        
+
         Returns:
             str: Chrome version string or None if not found
         """
         try:
             system = platform.system()
             logger.info(f"Detecting Chrome version on {system}")
-            
+
             if system == "Windows":
-                # Try different Windows Chrome paths
+                # Method 1: Try registry
+                try:
+                    import winreg
+                    key_path = r"Software\Google\Chrome\BLBeacon"
+                    for hive in [winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE]:
+                        try:
+                            key = winreg.OpenKey(hive, key_path)
+                            version, _ = winreg.QueryValueEx(key, "version")
+                            winreg.CloseKey(key)
+                            logger.info(f"Detected Chrome version from registry: {version}")
+                            return version
+                        except:
+                            continue
+                except Exception as e:
+                    logger.warning(f"Registry method failed: {str(e)}")
+
+                # Method 2: Check version folders in Chrome Application directory
                 paths = [
-                    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-                    r"C:\Users\%USERNAME%\AppData\Local\Google\Chrome\Application\chrome.exe"
+                    r"C:\Program Files\Google\Chrome\Application",
+                    r"C:\Program Files (x86)\Google\Chrome\Application",
+                    r"C:\Users\%USERNAME%\AppData\Local\Google\Chrome\Application"
                 ]
-                
+
                 for path in paths:
                     expanded_path = os.path.expandvars(path)
                     if os.path.exists(expanded_path):
-                        result = subprocess.run([expanded_path, "--version"], 
-                                              capture_output=True, text=True, timeout=10)
-                        if result.returncode == 0:
-                            version_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', result.stdout)
-                            if version_match:
-                                version = version_match.group(1)
-                                logger.info(f"Detected Chrome version: {version}")
-                                return version
+                        for item in os.listdir(expanded_path):
+                            if re.match(r'^\d+\.\d+\.\d+\.\d+$', item):
+                                logger.info(f"Detected Chrome version from folder: {item}")
+                                return item
                         break
-                        
+
             elif system == "Darwin":  # macOS
                 try:
                     result = subprocess.run(["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "--version"],
@@ -105,14 +119,14 @@ class IMFScraper:
                             return version
                 except FileNotFoundError:
                     pass
-                    
+
             elif system == "Linux":
                 try:
                     # Try common Linux Chrome commands
                     commands = ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]
                     for cmd in commands:
                         try:
-                            result = subprocess.run([cmd, "--version"], 
+                            result = subprocess.run([cmd, "--version"],
                                                   capture_output=True, text=True, timeout=10)
                             if result.returncode == 0:
                                 version_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', result.stdout)
@@ -124,12 +138,114 @@ class IMFScraper:
                             continue
                 except Exception:
                     pass
-            
+
             logger.warning("Could not detect Chrome version automatically")
             return None
-            
+
         except Exception as e:
             logger.warning(f"Error detecting Chrome version: {str(e)}")
+            return None
+
+    def download_chromedriver(self, version):
+        """
+        Download the correct ChromeDriver version for the detected Chrome version
+
+        Args:
+            version (str): Chrome version string (e.g., "140.0.7339.208")
+
+        Returns:
+            str: Path to the downloaded ChromeDriver executable, or None if failed
+        """
+        try:
+            major_version = version.split('.')[0]
+            logger.info(f"Downloading ChromeDriver for Chrome {major_version}")
+
+            # ChromeDriver download URL pattern
+            system = platform.system()
+            if system == "Windows":
+                platform_suffix = "win64"
+                driver_name = "chromedriver.exe"
+            elif system == "Darwin":
+                platform_suffix = "mac-x64"
+                driver_name = "chromedriver"
+            elif system == "Linux":
+                platform_suffix = "linux64"
+                driver_name = "chromedriver"
+            else:
+                logger.error(f"Unsupported platform: {system}")
+                return None
+
+            # Try to get the latest patch version for the major version
+            # ChromeDriver JSON endpoint
+            try:
+                # First, try to get the latest version for this major version
+                json_url = f"https://googlechromelabs.github.io/chrome-for-testing/latest-patch-versions-per-build-with-downloads.json"
+                response = requests.get(json_url, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+
+                if major_version in data.get('builds', {}):
+                    build_info = data['builds'][major_version]
+                    full_version = build_info['version']
+
+                    # Find the chromedriver download URL
+                    downloads = build_info.get('downloads', {}).get('chromedriver', [])
+                    download_url = None
+                    for download in downloads:
+                        if download.get('platform') == platform_suffix:
+                            download_url = download.get('url')
+                            break
+
+                    if not download_url:
+                        logger.warning(f"No download URL found for platform {platform_suffix}")
+                        return None
+
+                    logger.info(f"Found ChromeDriver version {full_version}")
+                    logger.info(f"Download URL: {download_url}")
+
+                    # Download the zip file
+                    zip_response = requests.get(download_url, timeout=60)
+                    zip_response.raise_for_status()
+
+                    # Create a temp directory for extraction
+                    temp_dir = os.path.join(os.getcwd(), "temp_chromedriver")
+                    os.makedirs(temp_dir, exist_ok=True)
+
+                    zip_path = os.path.join(temp_dir, "chromedriver.zip")
+                    with open(zip_path, 'wb') as f:
+                        f.write(zip_response.content)
+
+                    # Extract the zip
+                    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                        zip_ref.extractall(temp_dir)
+
+                    # Find the chromedriver executable
+                    driver_path = None
+                    for root, dirs, files in os.walk(temp_dir):
+                        if driver_name in files:
+                            driver_path = os.path.join(root, driver_name)
+                            break
+
+                    if driver_path and os.path.exists(driver_path):
+                        # Make it executable on Unix systems
+                        if system in ["Darwin", "Linux"]:
+                            os.chmod(driver_path, 0o755)
+
+                        logger.info(f"ChromeDriver downloaded successfully: {driver_path}")
+                        return driver_path
+                    else:
+                        logger.error("Could not find chromedriver in extracted files")
+                        return None
+                else:
+                    logger.warning(f"No ChromeDriver build found for Chrome {major_version}")
+                    return None
+
+            except Exception as e:
+                logger.error(f"Error downloading ChromeDriver: {str(e)}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error in download_chromedriver: {str(e)}")
             return None
     
     def set_download_directory(self):
@@ -146,74 +262,109 @@ class IMFScraper:
         
     def setup_driver(self):
         """Set up the undetected Chrome driver with download preferences and auto version detection"""
-        try:
-            # Detect Chrome version
-            chrome_version = self.detect_chrome_version()
-            
-            options = uc.ChromeOptions()
-            
-            # Set download preferences
-            prefs = {
-                "download.default_directory": self.download_dir,
-                "download.prompt_for_download": False,
-                "download.directory_upgrade": True,
-                "safebrowsing.enabled": True,
-                "safebrowsing.disable_download_protection": True,
-                "plugins.always_open_pdf_externally": True,
-                "download.open_pdf_in_system_reader": False,
-                "profile.default_content_settings.popups": 0,
-                "profile.default_content_setting_values.automatic_downloads": 1
-            }
-            options.add_experimental_option("prefs", prefs)
-            
-            # Headless mode configuration
-            if self.headless:
-                logger.info("Running in headless mode")
-                options.add_argument("--headless=new")  # Use new headless mode
-                options.add_argument("--disable-gpu")
-                options.add_argument("--window-size=1920,1080")
-            else:
-                logger.info("Running in visible mode")
-            
-            # Additional options for stability
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-blink-features=AutomationControlled")
-            options.add_argument("--disable-web-security")
-            options.add_argument("--allow-running-insecure-content")
-            
-            # Initialize driver with automatic version detection
-            if chrome_version:
-                logger.info(f"Initializing Chrome driver with detected version: {chrome_version}")
-                # Extract major version for compatibility
-                major_version = int(chrome_version.split('.')[0])
-                self.driver = uc.Chrome(options=options, version_main=major_version)
-            else:
-                logger.info("Initializing Chrome driver with automatic version detection")
-                self.driver = uc.Chrome(options=options)
-            
-            if not self.headless:
-                self.driver.maximize_window()
-            
-            # Verify and set download directory via JavaScript
-            self.set_download_directory()
-            
-            logger.info("Chrome driver initialized successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize Chrome driver: {str(e)}")
-            logger.info("Trying fallback initialization...")
+
+        # Detect Chrome version
+        chrome_version = self.detect_chrome_version()
+        driver_executable_path = None
+        major_version = None
+
+        if chrome_version:
             try:
-                # Fallback: try without version specification
-                self.driver = uc.Chrome(options=options)
+                major_version = int(chrome_version.split('.')[0])
+                logger.info(f"Detected Chrome major version: {major_version}")
+
+                # Download the correct ChromeDriver version
+                driver_executable_path = self.download_chromedriver(chrome_version)
+                if driver_executable_path:
+                    logger.info(f"Using custom ChromeDriver: {driver_executable_path}")
+            except Exception as e:
+                logger.warning(f"Could not download matching ChromeDriver: {str(e)}")
+
+        # Try multiple initialization strategies
+        strategies = []
+
+        # Strategy 1: Use downloaded chromedriver if available
+        if driver_executable_path:
+            strategies.append(('custom_driver', driver_executable_path))
+
+        # Strategy 2: Use detected version
+        if major_version:
+            strategies.append(('detected_version', major_version))
+
+        # Strategy 3: Try without version (auto-detect)
+        strategies.append(('auto', None))
+
+        # Strategy 4: Use subprocess mode
+        strategies.append(('subprocess', None))
+
+        for strategy_name, param in strategies:
+            try:
+                logger.info(f"Trying initialization strategy: {strategy_name}")
+
+                options = uc.ChromeOptions()
+
+                # Set download preferences
+                prefs = {
+                    "download.default_directory": self.download_dir,
+                    "download.prompt_for_download": False,
+                    "download.directory_upgrade": True,
+                    "safebrowsing.enabled": True,
+                    "safebrowsing.disable_download_protection": True,
+                    "plugins.always_open_pdf_externally": True,
+                    "download.open_pdf_in_system_reader": False,
+                    "profile.default_content_settings.popups": 0,
+                    "profile.default_content_setting_values.automatic_downloads": 1
+                }
+                options.add_experimental_option("prefs", prefs)
+
+                # Headless mode configuration
+                if self.headless:
+                    logger.info("Running in headless mode")
+                    options.add_argument("--headless=new")  # Use new headless mode
+                    options.add_argument("--disable-gpu")
+                    options.add_argument("--window-size=1920,1080")
+                else:
+                    logger.info("Running in visible mode")
+
+                # Additional options for stability
+                options.add_argument("--no-sandbox")
+                options.add_argument("--disable-dev-shm-usage")
+                options.add_argument("--disable-blink-features=AutomationControlled")
+                options.add_argument("--disable-web-security")
+                options.add_argument("--allow-running-insecure-content")
+
+                # Initialize driver based on strategy
+                if strategy_name == 'custom_driver':
+                    self.driver = uc.Chrome(options=options, driver_executable_path=param, use_subprocess=False)
+                elif strategy_name == 'subprocess':
+                    self.driver = uc.Chrome(options=options, use_subprocess=True)
+                elif strategy_name == 'detected_version':
+                    self.driver = uc.Chrome(options=options, version_main=param, use_subprocess=False)
+                else:
+                    self.driver = uc.Chrome(options=options, use_subprocess=False)
+
                 if not self.headless:
                     self.driver.maximize_window()
-                logger.info("Chrome driver initialized with fallback method")
+
+                # Verify and set download directory via JavaScript
+                self.set_download_directory()
+
+                logger.info(f"Chrome driver initialized successfully using strategy: {strategy_name}")
                 return True
-            except Exception as fallback_error:
-                logger.error(f"Fallback initialization also failed: {str(fallback_error)}")
-                return False
+
+            except Exception as e:
+                logger.warning(f"Strategy '{strategy_name}' failed: {str(e)}")
+                # Close driver if it was partially created
+                try:
+                    if self.driver:
+                        self.driver.quit()
+                        self.driver = None
+                except:
+                    pass
+                continue
+
+        logger.error("All initialization strategies failed")
+        return False
     
     def navigate_to_page(self):
         """Navigate to the IMF page and refresh"""
